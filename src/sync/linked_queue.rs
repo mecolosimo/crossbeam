@@ -112,7 +112,7 @@ impl<T> LinkedBlockingQueue<T> {
         }
     }
 
-    pub fn put(&self, t: T) {
+    fn put_internal(&self, t: T,  timeout: Option<Duration>) -> bool {
         let guard = epoch::pin();
         let &(ref lock, ref cvar) = &*self.not_full;
 
@@ -123,15 +123,35 @@ impl<T> LinkedBlockingQueue<T> {
         } );
 
         {
+            // scope for not_full Mutex
             let mut not_full = lock.lock().unwrap();        // locked
-            loop {
-                if *not_full == false {
-                    not_full = cvar.wait(not_full).unwrap();
-                } else {
-                    break;
+            if let Some(duration) = timeout {
+                let start = Instant::now();
+                loop {
+                    if *not_full == false {
+                        if start.elapsed() > duration {
+                            // waited long enough and still empty (might have returned early)
+                            return false;
+                        }
+                        let (mg, mtr) = cvar.wait_timeout(not_full, duration).unwrap();
+                        if mtr.timed_out() {
+                            return false;
+                        }
+                        not_full = mg;
+
+                    } else {
+                        break;
+                    }
+                }
+            } else {
+                loop {
+                    if *not_full == false {
+                        not_full = cvar.wait(not_full).unwrap();
+                    } else {
+                        break;
+                    }
                 }
             }
-
             // have lock-back and should have capacity
             // increase count (a take can happen before we get back)
             loop {
@@ -169,6 +189,15 @@ impl<T> LinkedBlockingQueue<T> {
         if **count > 0 {                // a take could have occurred
             self.signal_not_empty();    // signal threads waiting to take
         }
+        true
+    }
+
+    pub fn put_timeout(&self, t: T, timeout: Duration) -> bool {
+        self.put_internal(t, Some(timeout))
+    }
+
+    pub fn put(&self, t: T) {
+        self.put_internal(t, None);
     }
 
     #[inline(always)]
@@ -300,13 +329,16 @@ mod test {
 
     #[test]
     fn put_take_timeout_1() {
-        let q: LinkedBlockingQueue<i64> = LinkedBlockingQueue::new(Some(2));
+        let q: LinkedBlockingQueue<i64> = LinkedBlockingQueue::new(Some(1));
         assert!(q.is_empty());
         let duration = Duration::new(1,0);
         assert_eq!(q.take_timeout(duration), None);
         q.put(37);
         assert_eq!(q.take_timeout(duration), Some(37));
         assert!(q.is_empty());
+        q.put(37);
+        assert!(!q.put_timeout(38, duration));
+        assert!(!q.is_empty());
     }
 
     #[test]
