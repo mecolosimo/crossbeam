@@ -6,6 +6,15 @@ use std::time::{Duration, Instant};
 use mem::epoch::{self, Atomic, Owned, Shared};
 use mem::CachePadded;
 
+/// An optionally-bounded blocking queue based on linked nodes.
+///
+/// This queue orders elements FIFO (first-in-first-out).
+///
+/// The optional `capacity` bound argument serves as a way to prevent
+/// excessive queue expansion. The capacity, if unspecified,
+/// is equal to `u64::max_value()`.  Linked nodes are
+/// dynamically created upon each insertion, unless this would bring the
+/// queue above capacity.
 // #[derive(Debug)] // Condvar doesn't have Debug trait
 pub struct LinkedBlockingQueue<T> {
     capacity: u64,
@@ -33,7 +42,7 @@ struct Node<T> {
 }
 
 impl<T> LinkedBlockingQueue<T> {
-    /// Create a new, unlimited, empty queue.
+    /// Create a new empty queue.
     pub fn new(capacity: Option<u64>) -> LinkedBlockingQueue<T> {
         let mut c = u64::max_value();
         if capacity.is_some() {
@@ -60,16 +69,21 @@ impl<T> LinkedBlockingQueue<T> {
         q
     }
 
+    /// Returns the number of additional elements that this queue can ideally
+    /// accept without blocking (barring memory limitations).
     pub fn remaining_capacity(&self) -> u64 {
         let guard = epoch::pin();
         let count =  self.count.load(Relaxed, &guard).unwrap();
         self.capacity - **count
     }
 
+    /// Returns the number of elements in this queue.
     pub fn size(&self) -> u64 {
-        self.capacity
+        let guard = epoch::pin();
+        **(self.count.load(Relaxed, &guard).unwrap())
     }
 
+    /// Returns `true` if empty (size == 0).
     pub fn is_empty(&self) -> bool {
         let guard = epoch::pin();
         let count =  self.count.load(Relaxed, &guard).unwrap();
@@ -192,10 +206,14 @@ impl<T> LinkedBlockingQueue<T> {
         true
     }
 
+    /// Inserts the element at the tail of this queue, waiting if necessary
+    /// up to the specified wait time for space to become available.
     pub fn put_timeout(&self, t: T, timeout: Duration) -> bool {
         self.put_internal(t, Some(timeout))
     }
 
+    /// Insert the element at the tail of this queue, waiting if necessary
+    /// for space to become available
     pub fn put(&self, t: T) {
         self.put_internal(t, None);
     }
@@ -256,6 +274,8 @@ impl<T> LinkedBlockingQueue<T> {
         }
     }
 
+    /// Retrieves and removes the head element of this queue, waiting up to the
+    /// specified wait time if necessary for an element to become available.
     pub fn take_timeout(&self,  timeout: Duration) -> Option<T> {
         let guard = epoch::pin();
         let &(ref lock, ref cvar) = &*self.not_empty;
@@ -284,6 +304,8 @@ impl<T> LinkedBlockingQueue<T> {
         Some(self.take_internal(&guard, not_empty))
     }
 
+    /// Retrieves and removes the head element of this queue, waiting if necessary until
+    /// an element becomes available.
     pub fn take(&self) -> T {
         let guard = epoch::pin();
         let &(ref lock, ref cvar) = &*self.not_empty;
@@ -317,7 +339,7 @@ mod test {
     fn put_take_1() {
         let q: LinkedBlockingQueue<i64> = LinkedBlockingQueue::new(Some(2));
         assert!(q.is_empty());
-        assert_eq!(q.size(), 2);
+        assert_eq!(q.size(), 0);
         assert_eq!(q.remaining_capacity(), 2);
         q.put(37);
         assert_eq!(q.remaining_capacity(), 1);
